@@ -1,0 +1,67 @@
+import redis
+import functools
+import json
+import asyncio
+from utils.observer import Event
+
+r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+
+CACHE_HITS_KEY = "metrics:cache_hits"
+CACHE_MISSES_KEY = "metrics:cache_misses"
+
+cache_miss_event = Event()
+
+
+def redis_cache(ttl=60):
+    """
+    Redis cache decorator for ASYNC functions (FastAPI safe).
+    """
+    def decorator(func):
+        if not asyncio.iscoroutinefunction(func):
+            raise TypeError("redis_cache can only be used with async functions")
+
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            key = f"{func.__name__}:{args}:{tuple(kwargs.items())}"
+            print(f"🧠 redis_cache wrapper executed for key: {key}")
+
+            # Try cache
+            try:
+                cached = r.get(key)
+            except Exception as e:
+                print(f"❌ Redis GET failed: {e}")
+                cached = None
+
+            if cached is not None:
+                try:
+                    r.incr(CACHE_HITS_KEY)
+                except Exception:
+                    pass
+
+                try:
+                    return json.loads(cached)
+                except json.JSONDecodeError:
+                    return cached
+
+            # Cache miss
+            try:
+                r.incr(CACHE_MISSES_KEY)
+            except Exception:
+                pass
+
+            cache_miss_event.notify(f"Cache miss for key: {key}")
+
+            # Await actual function
+            result = await func(*args, **kwargs)
+
+            # Store result
+            try:
+                r.setex(key, ttl, json.dumps(result))
+            except TypeError:
+                r.setex(key, ttl, str(result))
+
+            return result
+
+        return wrapper
+
+    return decorator
